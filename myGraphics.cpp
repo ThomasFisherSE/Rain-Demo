@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#define _CRT_SECURE_NO_DEPRECATE
+#endif
+
 #include <stdio.h>
 #include <math.h>
 #include <vector>
@@ -51,7 +55,7 @@ typedef struct {
 	// Life
 	bool alive;
 	float life;
-	float fade;
+	float decayRate;
 
 	float r, g, b;
 	float x, y, z;
@@ -62,48 +66,53 @@ typedef struct {
 
 /*---------------------------Global Variables-------------------------------*/
 
-#define SCREEN_WIDTH 512
-#define SCREEN_HEIGHT 512
-#define MAX_RAIN 100000
+// Constants
+const int SCREEN_WIDTH = 720, SCREEN_HEIGHT = 720; // Window size
+const int MAX_RAIN = 100000; // Absolute maximum number of raindrops
+const int WIND_ANGLE = 60; // Wind angle multiplier
+const float FLOOR_Y = 0.03305f; // Height of the ground-plane
 
-const int WIND_ANGLE = 20;
-const float FLOOR_HEIGHT = 0.03305f;
+rainDrop rain[MAX_RAIN]; // Array for storing raindrops
+int totalRaindrops = 10000; // Number of raindrops to render
+GLuint waterTexture , groundTexture, furTexture; // Texture IDs
+float rainSpeed = 0.3f; // Speed of raindrops in pixels per update
+float wind = 0.2f; // Wind multiplier
 
-rainDrop rain[MAX_RAIN];
-int totalRaindrops = 10000;
-GLuint rainTexture;
-float rainSpeedMultiplier = 1.0f;
-float wind = 0.5f;
+GLint alpha, useTextures, tex; // Shader variable locations
 
 int cubeMapping=0;
 int lighting=1;
 int *triangles=NULL;
+
 float *vertices=NULL;
 float *normals=NULL;
 float *normalsPerFace=NULL;
 float middle[3]={0,0,0};
 float objectRadius=1;
+
 bool drawTriangles=1;
 bool drawRain = 1;
 bool drawFloor = 1;
 bool drawWireframe=0;
 bool drawVertices=0;
 bool drawNormals=0;
+
 int cubeMapNumber=1;
 int loadCubeMap=1;
-int renderingType=1;
+int renderingType=3;
 
-char *faceFile[6*4] = {
-	"Textures/cm_left.bmp","Textures/cm_right.bmp", "Textures/cm_top.bmp","Textures/cm_bottom.bmp", "Textures/cm_back.bmp","Textures/cm_front.bmp",
-	"Textures/nvlobby_new_negx.bmp","Textures/nvlobby_new_posx.bmp","Textures/nvlobby_new_negy.bmp","Textures/nvlobby_new_posy.bmp","Textures/nvlobby_new_negz.bmp","Textures/nvlobby_new_posz.bmp",
-	"Textures/darkterrain_negx.bmp","Textures/darkterrain_posx.bmp","Textures/darkterrain_negy.bmp","Textures/darkterrain_posy.bmp","Textures/darkterrain_negz.bmp","Textures/darkterrain_posz.bmp",
-	"Textures/dots_negx.bmp","Textures/dots_posx.bmp","Textures/dots_negy.bmp","Textures/dots_posy.bmp","Textures/dots_negz.bmp","Textures/dots_posz.bmp"};
+// Texture filepaths and sizes
+char* waterTexPath = "Textures/water.bmp";
+const int waterTexSizeX = 256, waterTexSizeY = 256;
+
+char* groundTexPath = "Textures/grass.bmp";
+const int groundTexSizeX = 2048, groundTexSizeY = 2048;
 
 char *fileNames[3]={"Models/bun_zipper.ply","Models/dragon.ply","Models/happy.ply"};
 int fileProperties[3*2]={35947,69451,437645,871414,543652,1087716};
 
-char *vertexProgramNames[1]={"GLSL/Example.vertex"};
-char *fragmentProgramNames[1]={"GLSL/Example.fragment"};
+char *vertexProgramNames[1]={"GLSL/shader.vert"};
+char *fragmentProgramNames[1]={"GLSL/shader.frag"};
 GLuint vShader=-1, fShader=-1, program=-1;
 
 int model=0;
@@ -194,6 +203,7 @@ void BMPReader(char *name, unsigned char **image, int &sizeX, int &sizeY)
 		delete[] *image;
 		*image=NULL;
 	}
+
 	f=fopen(name,"rb");
 	if (f==NULL) 
 	{
@@ -215,12 +225,9 @@ void BMPReader(char *name, unsigned char **image, int &sizeX, int &sizeY)
 	fclose(f);	
 }
 
-GLuint LoadTexture(char* tex_name)
+GLuint LoadTexture(char* tex_name, int width, int height)
 {
 	GLuint texture;
-
-	int width = 401;
-	int height = 800;
 
 	unsigned char* imageData;
 	imageData = (unsigned char*)malloc(width*height * 3);
@@ -233,14 +240,12 @@ GLuint LoadTexture(char* tex_name)
 	}
 
 	glGenTextures(1, &texture);
-	glBindTexture(GL_TEXTURE_2D, texture);
-	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
 
-	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-	//gluBuild2DMipmaps(GL_TEXTURE_2D, 3, width, height, GL_RGB, GL_UNSIGNED_BYTE, imageData);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexImage2D(GL_TEXTURE_2D, 0, 3, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, imageData);
+
 	free(imageData);
 
 	return texture;
@@ -301,6 +306,17 @@ char *ReadProgram (char *programName)
 	return program;
 }
 
+void PrepareShaderVariables()
+{
+	alpha = glGetUniformLocation(program, "alpha"); // Alpha level (for transparency)
+	useTextures = glGetUniformLocation(program, "useTextures"); // Flag for ignoring / using textures
+	tex = glGetUniformLocation(program, "tex"); // Texture to use
+
+	// Default values
+	glUniform1f(alpha, 1.0f);
+	glUniform1i(tex, 0);
+}
+
 void LoadShaders()
 {
 	const char *myVertexProgram;
@@ -333,22 +349,8 @@ void LoadShaders()
 	glLinkProgram(program);
 	glUseProgram(program);
 	PrintLog(program);
-}
 
-
-void makeCubeMap(void)
-{
-	int i;
-	int sizex,sizey;
-	unsigned char *image=NULL;	
-	
-	if (cubeMapping)
-	{
-		//SetupTextureMatrix();//Not always required. Depending on your implementation
-	}
-	else
-	{
-	}
+	PrepareShaderVariables();
 }
 
 void InitMatrix(float *m)
@@ -385,7 +387,7 @@ void InitialCameraSetup()
 	glMultMatrixf(orientationMatrix);
 	glGetFloatv(GL_MODELVIEW_MATRIX, orientationMatrix);
 
-	glClearColor(0.4f, 1.0f, 1.0f, 0);
+	glClearColor(0.6f, 0.9f, 1.0f, 0); // Set the color of the 'sky' (background)
 }
 
 void SetupModelview()
@@ -405,8 +407,8 @@ void SetupProjection()
 
 void SetupLighting()
 {
-	float ambiant[4]= {0.2,0.2,0.2,1.};
-	float diffuse[4]= {0.7,0.7,0.7,1.};
+	float ambiant[4]= {0.2f,0.2f,0.2f,1.};
+	float diffuse[4]= {0.7f,0.7f,0.7f,1.};
 	float specular[4]= {1,1,1,1.};
 	float exponent=4;
 	float lightDir[4] = {0,0,1,0};
@@ -463,7 +465,6 @@ void DrawTriangles(int nbTriangles)
 	glDisable(GL_LIGHTING);
 	glBegin(GL_TRIANGLES);
 	glColor3f(1,0,0);
-	float v1[3],v2[3],n[3],l,col;
 	for (int i=0;i<nbTriangles;i++)
 	{
 		int *vert=triangles+3*i;
@@ -477,146 +478,129 @@ void DrawTriangles(int nbTriangles)
 	glEnd();
 }
 
-void initialiseRaindrop(int i) {
-	rain[i].alive = true;
-	rain[i].life = 1.0;
-	rain[i].fade = float(rand() % 100) / 1000.0f + 0.005f;
-	//rain[i].x = 1/(float)(rand() % SCREEN_WIDTH);
-	rain[i].x = ((float)rand() / (RAND_MAX)) * 2 - 1;
-	rain[i].y = 1.0f; // Start rain at the top of the screen
-	rain[i].z = ((float)rand() / (RAND_MAX)) * 2 - 1;
-
-	rain[i].r = 0.0;
-	rain[i].g = 0.3;
-	rain[i].b = 1.0;
-
-	rain[i].width = 0.0025f;
-	rain[i].height = 0.01f;
-
-	rain[i].speed = rainSpeedMultiplier; // speed multiplier
-	//rain[i].gravity = -0.6;//-0.8;
-
-}
-
 void InitialiseTextures()
 {
 	glEnable(GL_DEPTH_TEST);
 
+	// Enable alpha blending for transparency
 	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); // Blending function to use
 
+	// Enable textures
 	glEnable(GL_TEXTURE_2D);
-	rainTexture = LoadTexture("water.bmp");
-	// Get a handle for our "myTextureSampler" uniform
-	GLuint TextureID = glGetUniformLocation(program, "myTextureSampler");
+	
+	// Load textures
+	waterTexture = LoadTexture(waterTexPath, waterTexSizeX, waterTexSizeY);
+	groundTexture = LoadTexture(groundTexPath, groundTexSizeX, groundTexSizeY);
+}
+
+void initialiseRaindrop(int i) {
+	rain[i].alive = true; // Used to check if the raindrop should be re-spawned yet
+	rain[i].life = 1.0f; // Life of the randrop which decays over time
+	
+	// Decay rate: Used to create stuttered spawn times 
+	// (prevents a lot of rain falling and then all re-spawning all at once)
+	rain[i].decayRate = float(rand() % 100) / 100.0f;
+
+	// Coordinates of raindrop centre
+	rain[i].x = ((float)rand() / (RAND_MAX)) * 2 - 1; // Random location (-1 to +1)
+	rain[i].y = 1.0f; // Start rain at the top of the screen
+	rain[i].z = ((float)rand() / (RAND_MAX)) * 2 - 1; // Random location (-1 to +1)
+
+	// Colour (To be used if shaders are disabled)
+	rain[i].r = 0.0f;
+	rain[i].g = 0.3f;
+	rain[i].b = 1.0f;
+
+	// Size of raindrop
+	rain[i].width = 0.004f;
+	rain[i].height = 0.01f;
+
+	// Falling speed of raindrop
+	rain[i].speed = rainSpeed;
 }
 
 void DrawRain()
 {
-	float x, y, z; // Position
-	float width, height;
+	glUniform1f(alpha, 0.2f); // Set rain to be semi-transparent
 
+	// Tell shaders to use textures to determine fragment colour
+	glUniform1i(useTextures, true); 
+
+	// Bind the texture to use
 	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, rainTexture);
+	glBindTexture(GL_TEXTURE_2D, waterTexture);
+	glUniform1i(tex, 0);
 
-	//glEnable(GL_TEXTURE_2D);
+	float x, y, z; // Position
+	float sizeX, sizeY; // Size
 
  	for (int i = 0; i < totalRaindrops; i++) {
  		if (rain[i].alive == true) {
+			// Initialise size and position
 			x = rain[i].x;
 			y = rain[i].y;
 			z = rain[i].z;
+			sizeX = rain[i].width;
+			sizeY = rain[i].height;
 
-			width = rain[i].width;
-			height = rain[i].height;
-
-			// Draw particles
-			glColor4f(0.0, 0.0, 0.9, 0.3); // blue
+			glColor4f(0., 0., 0.9f, 0.3f); // Default colour to use if shaders disabled / fail
 
 			glMatrixMode(GL_MODELVIEW);
 			glPushMatrix();
 			glTranslatef(x, y, z); // Centre rotation about raindrop anchor-point
-			glRotatef(wind * WIND_ANGLE, 0, 0, 1); // Rotate raindrop about z-axis
+			glRotatef(wind * WIND_ANGLE, 0, 0, 1); // Rotate raindrop about z-axis based on the wind
 
 			glBegin(GL_QUADS);
-			// Front-on
-			//glTexCoord2f(0, 1);
-			glVertex3f(x-width/2, y-height/2, z); // lower left
-			//glTexCoord2f(1, 1);
-			glVertex3f(x-width/2, y+height/2, z); // upper left
-			//glTexCoord2f(1, 0);
-			glVertex3f(x+width/2, y+height/2, z); // upper right
-			//glTexCoord2f(0, 0);
-			glVertex3f(x+width/2, y-height/2, z); // lower right
 
-			// Side-on
-			//glTexCoord2f(0, 0);
-			glVertex3f(x, y - height / 2, z-width/2); // lower left
-			//glTexCoord2f(0, 1);
-			glVertex3f(x, y + height / 2, z-width/2); // upper left
-			//glTexCoord2f(1, 1);
-			glVertex3f(x, y + height / 2, z+width/2); // upper right
-			//glTexCoord2f(1, 0);
-			glVertex3f(x, y - height / 2, z+width/2); // lower right 
+			// Front-on view
+			glTexCoord2f(0, 0);
+			glVertex3f(x-sizeX/2, y-sizeY/2, z); // lower left
 
-			/*
-			//Left
-			glVertex3f(x - size, y - size, z + size);
-			glVertex3f(x - size, y - size, z - size);
-			glVertex3f(x - size, y + size, z - size);
-			glVertex3f(x - size, y + size, z + size);
-			// Back
-			glVertex3f(x - size, y - size, z + size);
-			glVertex3f(x - size, y + size, z + size);
-			glVertex3f(x + size, y + size, z + size);
-			glVertex3f(x + size, y - size, z + size);
-			//Right
-			glVertex3f(x + size, y + size, z + size);
-			glVertex3f(x + size, y + size, z - size);
-			glVertex3f(x + size, y - size, z - size);
-			glVertex3f(x + size, y - size, z + size);
-			//Top
-			glVertex3f(x - size, y + size, z + size);
-			glVertex3f(x - size, y + size, z - size);
-			glVertex3f(x + size, y + size, z - size);
-			glVertex3f(x + size, y + size, z + size);
-			//Bottom
-			glVertex3f(x - size, y - size, z + size);
-			glVertex3f(x - size, y - size, z - size);
-			glVertex3f(x + size, y - size, z - size);
-			glVertex3f(x + size, y - size, z + size);
-			*/
+			glTexCoord2f(0, 1);
+			glVertex3f(x-sizeX/2, y+sizeY/2, z); // upper left
+
+			glTexCoord2f(1, 1);
+			glVertex3f(x+sizeX/2, y+sizeY/2, z); // upper right
+
+			glTexCoord2f(1, 0);
+			glVertex3f(x+sizeX/2, y-sizeY/2, z); // lower right
+
+			// Side-on view
+			glTexCoord2f(0, 0);
+			glVertex3f(x, y - sizeY / 2, z-sizeX/2); // lower left
+
+			glTexCoord2f(0, 1);
+			glVertex3f(x, y + sizeY / 2, z-sizeX/2); // upper left
+
+			glTexCoord2f(1, 1);
+			glVertex3f(x, y + sizeY / 2, z+sizeX/2); // upper right
+
+			glTexCoord2f(1, 0);
+			glVertex3f(x, y - sizeY / 2, z+sizeX/2); // lower right 
+
 			glEnd();
 
 			glPopMatrix();
 
-			// Update values
-			//Move
-			if (rain[i].y >= FLOOR_HEIGHT)
+			// Make the raindrop fall
+			if (rain[i].y >= FLOOR_Y)
 			{
-				rain[i].y -= height*rain[i].speed;
-				rain[i].x += wind / 100;
+				// Move down the screen based on the speed
+				rain[i].y -= sizeY*rain[i].speed;
+
+				// Move across the screen by a factor of the wind (which is constant across the scene)
+				rain[i].x += wind / 100; 
 			}
 			else {
+				// If the rain has passed the ground plane, destroy it
 				rain[i].life = 0;
 			}
+			
+			// Decay the life of the raindrop
+			rain[i].life -= rain[i].decayRate;
 
-			rain[i].life -= rain[i].fade;
-
-			/*
-			if (rain[i].ypos <= -10) {
-				rain[i].vel = rain[i].vel * -1.0;
-			}
-
-			float slowdown = 3.0;
-			rain[i].ypos += rain[i].vel / (slowdown * 1000); // * 1000
-			rain[i].vel += rain[i].gravity;
-
-			// Decay
-			rain[i].life -= rain[i].fade;
-			*/
-
-			//Revive
+			// If the raindrop was destroyed, create a new raindrop at the top of the screen
 			if (rain[i].life <= 0.0) {
 				initialiseRaindrop(i);
 			}
@@ -626,19 +610,35 @@ void DrawRain()
 	}
 }
 
-void DrawFloor()
+void DrawGroundPlane()
 {
+	glUniform1f(alpha, 1.0f);
+	glUniform1i(useTextures, true);
+
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, groundTexture);
+
 	glBegin(GL_QUADS);
-	glColor3f(0.0, 0.7, 0.1);
-	glVertex3f(-1.0, FLOOR_HEIGHT, -10.0); // front left
-	glVertex3f(-1.0, FLOOR_HEIGHT, 1.0); // back left
-	glVertex3f(1.0, FLOOR_HEIGHT, 1.0); // back right
-	glVertex3f(1.0, FLOOR_HEIGHT, -1.0); // front right
+	glColor3f(0., 0.7f, 0.1f);
+
+	glTexCoord2f(0, 0);
+	glVertex3f(-1.0, FLOOR_Y, -1.0); // Front Left
+
+	glTexCoord2f(0, 1);
+	glVertex3f(-1.0, FLOOR_Y, 1.0); // Back Left
+
+	glTexCoord2f(1, 1);
+	glVertex3f(1.0, FLOOR_Y, 1.0); // Back Right
+
+	glTexCoord2f(1, 0);
+	glVertex3f(1.0, FLOOR_Y, -1.0); // Front Right
 	glEnd();
 }
 
 void DrawTrianglesQ2(int nbTriangles) 
 {
+	glEnable(GL_LIGHTING);
+
 	glBegin(GL_TRIANGLES);
 	glColor3f(1.0,1.0,1.0);
 	for (int i=0;i<nbTriangles;i++)
@@ -678,13 +678,19 @@ void DrawTrianglesQ3(int nbTriangles)
 	glEnd();
 }
 
-void DrawTrianglesGLSL(int nbTriangles)
+void DrawRabbit(int nbTriangles)
 {
 	PrintLog(program);
-	int attribId = glGetAttribLocation(program, "inputNormal");
+	int inputNormal = glGetAttribLocation(program, "inputNormal");
+
+	bool useTextures = false;
+	GLint useTexturesLoc = glGetUniformLocation(program, "useTextures");
+	glUniform1i(useTexturesLoc, useTextures);
 
 	glBegin(GL_TRIANGLES);
-	glColor3f(0.8, 0.8, 0);
+	glColor3f(1, 1, 1);
+
+
 	for (int i = 0; i<nbTriangles; i++)
 	{
 		int *vert = triangles + 3 * i;
@@ -694,11 +700,14 @@ void DrawTrianglesGLSL(int nbTriangles)
 		float *n1 = normals + 3 * vert[0];
 		float *n2 = normals + 3 * vert[1];
 		float *n3 = normals + 3 * vert[2];
-		glVertexAttrib3fv(attribId, n1);
+
+		glVertexAttrib3fv(inputNormal, n1);
 		glVertex3fv(pt1);
-		glVertexAttrib3fv(attribId, n2);
+
+		glVertexAttrib3fv(inputNormal, n2);
 		glVertex3fv(pt2);
-		glVertexAttrib3fv(attribId, n3);
+		
+		glVertexAttrib3fv(inputNormal, n3);
 		glVertex3fv(pt3);
 	}
 	glEnd();
@@ -729,8 +738,8 @@ void ReadFile(char *name,int nbOfVertices, int nbOfTriangles)
 	int i,j;
 	float aux1, aux2;
 	int polygonNb;
-	float min[3]={99999999,99999999,99999999};
-	float max[3]={-99999999,-99999999,-99999999};
+	float min[3]={99999999.0f,99999999.0f,99999999.0f};
+	float max[3]={-99999999.0f,-99999999.0f,-99999999.0f};
 	if (triangles!=NULL)
 		delete[] triangles; //new and delete operators are specific to c++!
 	if (vertices!=NULL)
@@ -856,8 +865,8 @@ void Key(unsigned char c, int mousex, int mousey)
 			ComputeNormals(fileProperties[2*model],fileProperties[2*model+1]);
 			glutPostRedisplay ();
 			*/
-			rainSpeedMultiplier *= 1.1;
-			printf("Rain Speed Multiplier: %f\n", rainSpeedMultiplier);
+			rainSpeed *= 1.1f;
+			printf("Rain Speed Multiplier: %f\n", rainSpeed);
 			break;
 		case '-':
 			/*
@@ -865,46 +874,46 @@ void Key(unsigned char c, int mousex, int mousey)
 			ComputeNormals(fileProperties[2*model],fileProperties[2*model+1]);
 			glutPostRedisplay ();
 			*/
-			rainSpeedMultiplier *= 0.9;
-			printf("Rain Speed Multiplier: %f\n", rainSpeedMultiplier);
+			rainSpeed *= 0.9f;
+			printf("Rain Speed Multiplier: %f\n", rainSpeed);
 			break;
 		case '>':
-			if ((totalRaindrops*1.05) > MAX_RAIN)
+			if ((totalRaindrops*1.05f) > MAX_RAIN)
 			{
 				totalRaindrops = MAX_RAIN;
 			}
 			else {
-				totalRaindrops *= 1.05;
+				totalRaindrops *= 1.05f;
 			}
 
 			printf("Number of raindrops being rendered: %d\n", totalRaindrops);
 			break;
 		case '<':
-			if ((totalRaindrops*0.95) <= 1)
+			if ((totalRaindrops*0.95f) <= 1.)
 			{
-				totalRaindrops = 1;
+				totalRaindrops = 1.;
 			}
 			else {
-				totalRaindrops *= 0.95;
+				totalRaindrops *= 0.95f;
 			}
 
 			printf("Number of raindrops being rendered: %d\n", totalRaindrops);
 
 			break;
 		case ')':
-			wind *= 1.05;
+			wind *= 1.05f;
 			printf("Wind: %f\n", wind);
 			break;
 		case '(':
-			wind *= 0.95;
+			wind *= 0.95f;
 			printf("Wind: %f\n", wind);
 			break;
 		case '*' :
-			zoom*=0.8;
+			zoom*=0.8f;
 			glutPostRedisplay ();
 			break;
 	    case '/' :
-			zoom*=1.25;
+			zoom*=1.25f;
 			glutPostRedisplay ();
 			break;
 	    case '3' :
@@ -948,11 +957,11 @@ void Key(unsigned char c, int mousex, int mousey)
 			glutPostRedisplay();
 			break;
 	    case 'g' :
-			glClearColor(0.0,0.1,0,0);
+			glClearColor(0.0f,0.1f,0.0f,0.0f);
 			glutPostRedisplay();
 			break;
 	    case 'b' :
-			glClearColor(0.4f,1.0f,1.0f,0);
+			glClearColor(0.4f,1.0f,1.0f,0.0f);
 			glutPostRedisplay();
 			break;
 	    case '0' :
@@ -1040,7 +1049,6 @@ void Draw()
 {
 	glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 	SetupLighting();
-	makeCubeMap();
 	SetupModelview();
 	SetupProjection();
 	if (drawTriangles)
@@ -1057,7 +1065,7 @@ void Draw()
 				DrawTrianglesQ3(fileProperties[2*model+1]);
 				break;
 			case 3:	
-				DrawTrianglesGLSL(fileProperties[2*model+1]);
+				DrawRabbit(fileProperties[2*model+1]);
 				break;
 		}
 	}
@@ -1069,7 +1077,7 @@ void Draw()
 		DrawNormals(fileProperties[2*model]);
 
 	if (drawFloor)
-		DrawFloor();
+		DrawGroundPlane();
 
 	if (drawRain)
 		DrawRain();
@@ -1091,7 +1099,7 @@ void Init_GL(int sizex, int sizey)
     glutSpecialFunc(Arrow);
 	glEnable(GL_DEPTH_TEST);
 	glDepthFunc(GL_LEQUAL);
-	glGenTextures(1, &texName); //Creates a texture name for the mirror...
+	//glGenTextures(1, &texName); //Creates a texture name for the mirror...
 }
 
 void PrintFeatureList()
@@ -1127,6 +1135,7 @@ int main(int argc, char **argv)
 	ReadFile(fileNames[model],fileProperties[2*model],fileProperties[2*model+1]);
 	ComputeNormals(fileProperties[2*model],fileProperties[2*model+1]);
 	InitMatrix(orientationMatrix);
+
 	Init_GL(SCREEN_WIDTH, SCREEN_HEIGHT);
 	
 	printf("%s %s\n",(char *) glGetString(GL_VERSION),(char *) glGetString(GL_EXTENSIONS));
@@ -1141,14 +1150,14 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 	
-	//LoadShaders();
+	InitialiseTextures();
+
+	LoadShaders();
 
 	// Initialize raindrops
 	for (int i = 0; i < MAX_RAIN; i++) {
 		initialiseRaindrop(i);
 	}
-
-	//InitialiseTextures();
 
 	InitialCameraSetup();
 

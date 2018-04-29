@@ -145,11 +145,11 @@
     <ClCompile Include="myGraphics.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="GLSL\Example.fragment" />
-    <None Include="GLSL\Example.vertex" />
+    <None Include="GLSL\shader.frag" />
+    <None Include="GLSL\shader.vert" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="raindrop.bmp" />
+    <Image Include="ground.bmp" />
     <Image Include="water.bmp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
