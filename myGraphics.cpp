@@ -53,7 +53,6 @@ static GLenum faceTarget[6] = { /*Copyright NVidia*/
 // Rain type
 typedef struct {
 	// Life
-	bool alive;
 	float life;
 	float decayRate;
 
@@ -71,11 +70,11 @@ const int SCREEN_WIDTH = 720, SCREEN_HEIGHT = 720; // Window size
 const int MAX_RAIN = 100000; // Absolute maximum number of raindrops
 const int WIND_ANGLE = 60; // Wind angle multiplier
 const float FLOOR_Y = 0.03305f; // Height of the ground-plane
-
+const float CLOUD_Y = 1.0f; // Height of the rain spawn-point
 rainDrop rain[MAX_RAIN]; // Array for storing raindrops
 int totalRaindrops = 10000; // Number of raindrops to render
 GLuint waterTexture , groundTexture, furTexture; // Texture IDs
-float rainSpeed = 0.3f; // Speed of raindrops in pixels per update
+float rainSpeed = 0.8f; // Speed of raindrops in pixels per update
 float wind = 0.2f; // Wind multiplier
 
 GLint alpha, useTextures, tex; // Shader variable locations
@@ -100,10 +99,11 @@ bool drawNormals=0;
 int cubeMapNumber=1;
 int loadCubeMap=1;
 int renderingType=3;
+int selectedRainTex = 0; // selected rain texture to use
 
 // Texture filepaths and sizes
-char* waterTexPath = "Textures/water.bmp";
-const int waterTexSizeX = 256, waterTexSizeY = 256;
+char* rainTexPath[2] = { "Textures/water.bmp", "Textures/raintexture.bmp" };
+const int rainTexSizeX = 256, rainTexSizeY = 256;
 
 char* groundTexPath = "Textures/grass.bmp";
 const int groundTexSizeX = 2048, groundTexSizeY = 2048;
@@ -116,7 +116,7 @@ char *fragmentProgramNames[1]={"GLSL/shader.frag"};
 GLuint vShader=-1, fShader=-1, program=-1;
 
 int model=0;
-float zoom=1.0f;
+float zoom=1.5f;
 int normal_smoothing_interation=0;
 
 GLuint texName;
@@ -244,7 +244,7 @@ GLuint LoadTexture(char* tex_name, int width, int height)
 	glBindTexture(GL_TEXTURE_2D, texture);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexImage2D(GL_TEXTURE_2D, 0, 3, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, imageData);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, imageData);
 
 	free(imageData);
 
@@ -387,7 +387,7 @@ void InitialCameraSetup()
 	glMultMatrixf(orientationMatrix);
 	glGetFloatv(GL_MODELVIEW_MATRIX, orientationMatrix);
 
-	glClearColor(0.6f, 0.9f, 1.0f, 0); // Set the color of the 'sky' (background)
+	glClearColor(0.6f, 0.85f, 1.0f, 0); // Set the color of the 'sky' (background)
 }
 
 void SetupModelview()
@@ -490,30 +490,41 @@ void InitialiseTextures()
 	glEnable(GL_TEXTURE_2D);
 	
 	// Load textures
-	waterTexture = LoadTexture(waterTexPath, waterTexSizeX, waterTexSizeY);
+	waterTexture = LoadTexture(rainTexPath[selectedRainTex], rainTexSizeX, rainTexSizeY);
 	groundTexture = LoadTexture(groundTexPath, groundTexSizeX, groundTexSizeY);
 }
 
 void initialiseRaindrop(int i) {
-	rain[i].alive = true; // Used to check if the raindrop should be re-spawned yet
 	rain[i].life = 1.0f; // Life of the randrop which decays over time
 	
-	// Decay rate: Used to create stuttered spawn times 
+	// Decay rate, used to create stuttered spawn times 
 	// (prevents a lot of rain falling and then all re-spawning all at once)
-	rain[i].decayRate = float(rand() % 100) / 100.0f;
+	// The every time the raindrop's position is updated, it decays a small amount
+	rain[i].decayRate = float(rand() % 100) / 2000.0f; // Random rate (0 to 0.05)
+
+	/* 
+	 * Threshold the decay rate so that slowly decaying raindrops no longer decay at all
+	 * Note: I added this so that rain closer to the ground doesn't just disappear all of a sudden.
+	 * With this thresholding, raindrops that fade away before hitting the ground will not be seen 
+	 * near the ground.
+	 */
+	if (rain[i].decayRate < 0.015)
+	{
+		rain[i].decayRate = 0;
+	}
 
 	// Coordinates of raindrop centre
 	rain[i].x = ((float)rand() / (RAND_MAX)) * 2 - 1; // Random location (-1 to +1)
-	rain[i].y = 1.0f; // Start rain at the top of the screen
+	rain[i].y = CLOUD_Y; // Start rain at the top of the screen
 	rain[i].z = ((float)rand() / (RAND_MAX)) * 2 - 1; // Random location (-1 to +1)
 
 	// Colour (To be used if shaders are disabled)
-	rain[i].r = 0.0f;
-	rain[i].g = 0.3f;
-	rain[i].b = 1.0f;
+	rain[i].r = 0.0f; // red channel
+	rain[i].g = 0.3f; // green channel
+	rain[i].b = 1.0f; // blue channel
 
 	// Size of raindrop
-	rain[i].width = 0.004f;
+	rain[i].width = 0.002f; 
 	rain[i].height = 0.01f;
 
 	// Falling speed of raindrop
@@ -522,7 +533,7 @@ void initialiseRaindrop(int i) {
 
 void DrawRain()
 {
-	glUniform1f(alpha, 0.2f); // Set rain to be semi-transparent
+	glUniform1f(alpha, 0.4f); // Set rain to be semi-transparent
 
 	// Tell shaders to use textures to determine fragment colour
 	glUniform1i(useTextures, true); 
@@ -536,74 +547,73 @@ void DrawRain()
 	float sizeX, sizeY; // Size
 
  	for (int i = 0; i < totalRaindrops; i++) {
- 		if (rain[i].alive == true) {
-			// Initialise size and position
-			x = rain[i].x;
-			y = rain[i].y;
-			z = rain[i].z;
-			sizeX = rain[i].width;
-			sizeY = rain[i].height;
+		// Initialise size and position
+		x = rain[i].x;
+		y = rain[i].y;
+		z = rain[i].z;
 
-			glColor4f(0., 0., 0.9f, 0.3f); // Default colour to use if shaders disabled / fail
+		sizeX = rain[i].width;
+		sizeY = rain[i].height;
 
-			glMatrixMode(GL_MODELVIEW);
-			glPushMatrix();
-			glTranslatef(x, y, z); // Centre rotation about raindrop anchor-point
-			glRotatef(wind * WIND_ANGLE, 0, 0, 1); // Rotate raindrop about z-axis based on the wind
+		glColor4f(rain[i].r, rain[i].g, rain[i].b, 0.4f); // Default colour to use if shaders disabled / fail
 
-			glBegin(GL_QUADS);
+		glMatrixMode(GL_MODELVIEW);
+		glPushMatrix();
+		glTranslatef(x, y, z); // Centre rotation about raindrop anchor-point
+		glRotatef(wind * WIND_ANGLE, 0, 0, 1); // Rotate raindrop about z-axis based on the wind
 
-			// Front-on view
-			glTexCoord2f(0, 0);
-			glVertex3f(x-sizeX/2, y-sizeY/2, z); // lower left
+		glBegin(GL_QUADS);
 
-			glTexCoord2f(0, 1);
-			glVertex3f(x-sizeX/2, y+sizeY/2, z); // upper left
+		// Front-on view
+		glTexCoord2f(0, 0);
+		glVertex3f(x-sizeX/2, y-sizeY/2, z); // lower left
 
-			glTexCoord2f(1, 1);
-			glVertex3f(x+sizeX/2, y+sizeY/2, z); // upper right
+		glTexCoord2f(0, 1);
+		glVertex3f(x-sizeX/2, y+sizeY/2, z); // upper left
 
-			glTexCoord2f(1, 0);
-			glVertex3f(x+sizeX/2, y-sizeY/2, z); // lower right
+		glTexCoord2f(1, 1);
+		glVertex3f(x+sizeX/2, y+sizeY/2, z); // upper right
 
-			// Side-on view
-			glTexCoord2f(0, 0);
-			glVertex3f(x, y - sizeY / 2, z-sizeX/2); // lower left
+		glTexCoord2f(1, 0);
+		glVertex3f(x+sizeX/2, y-sizeY/2, z); // lower right
 
-			glTexCoord2f(0, 1);
-			glVertex3f(x, y + sizeY / 2, z-sizeX/2); // upper left
+		// Side-on view
+		glTexCoord2f(0, 0);
+		glVertex3f(x, y - sizeY / 2, z-sizeX/2); // lower left
 
-			glTexCoord2f(1, 1);
-			glVertex3f(x, y + sizeY / 2, z+sizeX/2); // upper right
+		glTexCoord2f(0, 1);
+		glVertex3f(x, y + sizeY / 2, z-sizeX/2); // upper left
 
-			glTexCoord2f(1, 0);
-			glVertex3f(x, y - sizeY / 2, z+sizeX/2); // lower right 
+		glTexCoord2f(1, 1);
+		glVertex3f(x, y + sizeY / 2, z+sizeX/2); // upper right
 
-			glEnd();
+		glTexCoord2f(1, 0);
+		glVertex3f(x, y - sizeY / 2, z+sizeX/2); // lower right 
 
-			glPopMatrix();
+		glEnd();
 
-			// Make the raindrop fall
-			if (rain[i].y >= FLOOR_Y)
-			{
-				// Move down the screen based on the speed
-				rain[i].y -= sizeY*rain[i].speed;
+		glPopMatrix();
 
-				// Move across the screen by a factor of the wind (which is constant across the scene)
-				rain[i].x += wind / 100; 
-			}
-			else {
-				// If the rain has passed the ground plane, destroy it
-				rain[i].life = 0;
-			}
+		// Make the raindrop fall
+		if (rain[i].y >= FLOOR_Y)
+		{
+			// Move down the screen based on the speed
+			rain[i].y -= sizeY*rain[i].speed;
+
+			// Move across the screen by a factor of the wind (which is constant across the scene)
+			rain[i].x += (wind*rain[i].speed) / 100; 
+		}
+		else {
+			// If the rain has passed the ground plane, destroy it
+			rain[i].life = 0;
+		}
 			
-			// Decay the life of the raindrop
-			rain[i].life -= rain[i].decayRate;
+		// Decay the life of the raindrop
+		rain[i].life -= rain[i].decayRate;
 
-			// If the raindrop was destroyed, create a new raindrop at the top of the screen
-			if (rain[i].life <= 0.0) {
-				initialiseRaindrop(i);
-			}
+		// If the raindrop was destroyed, create a new raindrop at the top of the screen
+		if (rain[i].life <= 0.0) {
+			initialiseRaindrop(i);
 		}
 
 		glutPostRedisplay();
@@ -612,14 +622,14 @@ void DrawRain()
 
 void DrawGroundPlane()
 {
-	glUniform1f(alpha, 1.0f);
-	glUniform1i(useTextures, true);
+	glUniform1f(alpha, 1.0f); // Tell shader to colour the ground opaque
+	glUniform1i(useTextures, true); // Tell the shader to use texture for the ground
 
 	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, groundTexture);
+	glBindTexture(GL_TEXTURE_2D, groundTexture); // Bind the ground texture
 
 	glBegin(GL_QUADS);
-	glColor3f(0., 0.7f, 0.1f);
+	glColor3f(0., 0.7f, 0.1f); // Default texture if shaders / texturing fail
 
 	glTexCoord2f(0, 0);
 	glVertex3f(-1.0, FLOOR_Y, -1.0); // Front Left
@@ -681,15 +691,12 @@ void DrawTrianglesQ3(int nbTriangles)
 void DrawRabbit(int nbTriangles)
 {
 	PrintLog(program);
-	int inputNormal = glGetAttribLocation(program, "inputNormal");
+	int inputNormal = glGetAttribLocation(program, "inputNormal"); // Pass the input normal to the shaders
 
-	bool useTextures = false;
-	GLint useTexturesLoc = glGetUniformLocation(program, "useTextures");
-	glUniform1i(useTexturesLoc, useTextures);
+	glUniform1i(useTextures, false); // Tell shaders not to use textures
 
 	glBegin(GL_TRIANGLES);
-	glColor3f(1, 1, 1);
-
+	glColor3f(1, 1, 1); // Default colour if shaders and textures fail
 
 	for (int i = 0; i<nbTriangles; i++)
 	{
@@ -916,12 +923,6 @@ void Key(unsigned char c, int mousex, int mousey)
 			zoom*=1.25f;
 			glutPostRedisplay ();
 			break;
-	    case '3' :
-			model=(model+1)%3;
-			ReadFile(fileNames[model],fileProperties[2*model],fileProperties[2*model+1]);
-			ComputeNormals(fileProperties[2*model],fileProperties[2*model+1]);
-			glutPostRedisplay ();
-			break;
 	    case 'c' :
 			cubeMapping=!cubeMapping;		
 			glutPostRedisplay ();
@@ -962,6 +963,16 @@ void Key(unsigned char c, int mousex, int mousey)
 			break;
 	    case 'b' :
 			glClearColor(0.4f,1.0f,1.0f,0.0f);
+			glutPostRedisplay();
+			break;
+		case '1':
+			selectedRainTex = 0;
+			waterTexture = LoadTexture(rainTexPath[selectedRainTex], rainTexSizeX, rainTexSizeY);
+			glutPostRedisplay();
+			break;
+		case '2':
+			selectedRainTex = 1;
+			waterTexture = LoadTexture(rainTexPath[selectedRainTex], rainTexSizeX, rainTexSizeY);
 			glutPostRedisplay();
 			break;
 	    case '0' :
@@ -1126,6 +1137,7 @@ void PrintKeys()
 	printf("+,-: Speeds up or slows down rainfall by 10%%.\n");
 	printf(">,<: Increase or decrease the total number of raindrops being rendered by 5%%.\n");
 	printf("),(: Increase or decrease the wind level by 5%%.\n");
+	printf("0, 1: Change raindrop texture between water.bmp and raintexture.bmp respectively.\n");
 	printf("See the Key function for more options.\n\n");
 }
 
@@ -1136,6 +1148,7 @@ int main(int argc, char **argv)
 	ComputeNormals(fileProperties[2*model],fileProperties[2*model+1]);
 	InitMatrix(orientationMatrix);
 
+	
 	Init_GL(SCREEN_WIDTH, SCREEN_HEIGHT);
 	
 	printf("%s %s\n",(char *) glGetString(GL_VERSION),(char *) glGetString(GL_EXTENSIONS));
@@ -1150,9 +1163,8 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 	
-	InitialiseTextures();
-
 	LoadShaders();
+	InitialiseTextures();
 
 	// Initialize raindrops
 	for (int i = 0; i < MAX_RAIN; i++) {
